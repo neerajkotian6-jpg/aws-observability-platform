@@ -1,0 +1,98 @@
+name: Deploy Grafana Dashboards and Alerts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "grafana/**"
+      - "scripts/deploy_grafana_config.sh"
+      - ".github/workflows/deploy-dashboards.yml"
+  workflow_run:
+    workflows: ["Deploy Infrastructure (CloudFormation)"]
+    types: [completed]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT: dev
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-dashboards:
+    name: Deploy Grafana Config
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get Grafana endpoint from CloudFormation
+        id: grafana
+        run: |
+          ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name "${ENVIRONMENT}-grafana" \
+            --query "Stacks[0].Outputs[?OutputKey=='GrafanaEndpoint'].OutputValue" \
+            --output text)
+          echo "url=${ENDPOINT}" >> $GITHUB_OUTPUT
+
+      - name: Get SNS Topic ARN
+        id: sns
+        run: |
+          SNS_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "${ENVIRONMENT}-observability-sns" \
+            --query "Stacks[0].Outputs[?OutputKey=='SNSTopicArn'].OutputValue" \
+            --output text)
+          echo "arn=${SNS_ARN}" >> $GITHUB_OUTPUT
+
+      - name: Create temporary Grafana API key
+        id: apikey
+        run: |
+          WORKSPACE_ID=$(aws cloudformation describe-stacks \
+            --stack-name "${ENVIRONMENT}-grafana" \
+            --query "Stacks[0].Outputs[?OutputKey=='GrafanaWorkspaceId'].OutputValue" \
+            --output text)
+          API_KEY=$(aws grafana create-workspace-api-key \
+            --key-name "github-actions-$(date +%s)" \
+            --key-role ADMIN \
+            --seconds-to-live 600 \
+            --workspace-id "${WORKSPACE_ID}" \
+            --query key \
+            --output text)
+          echo "::add-mask::${API_KEY}"
+          echo "key=${API_KEY}" >> $GITHUB_OUTPUT
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Deploy dashboards and alerts
+        env:
+          GRAFANA_URL: ${{ steps.grafana.outputs.url }}
+          GRAFANA_API_KEY: ${{ steps.apikey.outputs.key }}
+          SNS_TOPIC_ARN: ${{ steps.sns.outputs.arn }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          ENVIRONMENT: ${{ env.ENVIRONMENT }}
+        run: |
+          chmod +x scripts/deploy_grafana_config.sh
+          ./scripts/deploy_grafana_config.sh
+
+      - name: Output summary
+        run: |
+          echo "### Grafana Config Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Dashboard       | Deployed |" >> $GITHUB_STEP_SUMMARY
+          echo "| Alert Rules     | Deployed |" >> $GITHUB_STEP_SUMMARY
+          echo "| Contact Point   | Configured |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana URL     | ${{ steps.grafana.outputs.url }} |" >> $GITHUB_STEP_SUMMARY

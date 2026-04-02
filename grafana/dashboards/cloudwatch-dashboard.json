@@ -1,0 +1,245 @@
+{
+  "title": "CloudWatch Observability",
+  "uid": "cloudwatch-observability-v1",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "1m",
+  "tags": ["cloudwatch", "observability", "aws"],
+  "time": { "from": "now-3h", "to": "now" },
+  "timepicker": {},
+  "templating": {
+    "list": [
+      {
+        "name": "environment",
+        "label": "Environment",
+        "type": "custom",
+        "options": [
+          { "text": "dev",     "value": "dev"     },
+          { "text": "staging", "value": "staging" },
+          { "text": "prod",    "value": "prod"    }
+        ],
+        "current": { "text": "dev", "value": "dev" }
+      },
+      {
+        "name": "region",
+        "label": "AWS Region",
+        "type": "custom",
+        "options": [
+          { "text": "us-east-1",  "value": "us-east-1"  },
+          { "text": "ap-south-1", "value": "ap-south-1" },
+          { "text": "eu-west-1",  "value": "eu-west-1"  }
+        ],
+        "current": { "text": "us-east-1", "value": "us-east-1" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Application Errors (Last 1h)",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "Custom/$environment",
+          "metricName": "ApplicationErrors",
+          "statistics": ["Sum"],
+          "period": "3600",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 5    },
+              { "color": "red",    "value": 20   }
+            ]
+          },
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Lambda Errors (Last 1h)",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/Lambda",
+          "metricName": "Errors",
+          "statistics": ["Sum"],
+          "period": "3600",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 1    },
+              { "color": "red",    "value": 10   }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "EC2 Avg CPU %",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/EC2",
+          "metricName": "CPUUtilization",
+          "statistics": ["Average"],
+          "period": "300",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 60   },
+              { "color": "red",    "value": 80   }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Lambda Invocations (Last 1h)",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/Lambda",
+          "metricName": "Invocations",
+          "statistics": ["Sum"],
+          "period": "3600",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Application Errors Over Time",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "Custom/$environment",
+          "metricName": "ApplicationErrors",
+          "statistics": ["Sum"],
+          "period": "300",
+          "refId": "A",
+          "alias": "Errors"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "#d62728", "mode": "fixed" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15 }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Lambda: Invocations / Errors / Duration",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/Lambda",
+          "metricName": "Invocations",
+          "statistics": ["Sum"],
+          "period": "60",
+          "refId": "A",
+          "alias": "Invocations"
+        },
+        {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/Lambda",
+          "metricName": "Errors",
+          "statistics": ["Sum"],
+          "period": "60",
+          "refId": "B",
+          "alias": "Errors"
+        },
+        {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/Lambda",
+          "metricName": "Duration",
+          "statistics": ["p99"],
+          "period": "60",
+          "refId": "C",
+          "alias": "P99 Duration (ms)"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "EC2 CPU Utilization",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "namespace": "AWS/EC2",
+          "metricName": "CPUUtilization",
+          "statistics": ["Average", "Maximum"],
+          "period": "300",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red",   "value": 80   }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "logs",
+      "title": "Recent Application Errors",
+      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "cloudwatch", "uid": "cloudwatch" },
+          "queryMode": "Logs",
+          "logGroupNames": ["/app/$environment/application"],
+          "expression": "fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 50",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

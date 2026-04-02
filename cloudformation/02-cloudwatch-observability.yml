@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  CloudWatch Observability setup — Application Insights,
+  CloudWatch Alarms, Log Groups, and a CloudWatch Dashboard.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  SNSTopicArn:
+    Type: String
+    Description: SNS topic ARN for alarm notifications
+  EC2InstanceId:
+    Type: String
+    Description: EC2 instance to monitor (leave blank to skip EC2 alarms)
+    Default: ""
+
+Conditions:
+  HasEC2: !Not [!Equals [!Ref EC2InstanceId, ""]]
+
+Resources:
+
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/app/${Environment}/application"
+      RetentionInDays: 30
+
+  SystemLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/app/${Environment}/system"
+      RetentionInDays: 14
+
+  AppInsightsApplication:
+    Type: AWS::ApplicationInsights::Application
+    Properties:
+      ResourceGroupName: !Sub "${Environment}-observability-group"
+      AutoConfigurationEnabled: true
+      CWEMonitorEnabled: true
+      OpsCenterEnabled: false
+
+  ErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref AppLogGroup
+      FilterName: ErrorCount
+      FilterPattern: "[timestamp, requestId, level=ERROR, ...]"
+      MetricTransformations:
+        - MetricName: ApplicationErrors
+          MetricNamespace: !Sub "Custom/${Environment}"
+          MetricValue: "1"
+          DefaultValue: 0
+          Unit: Count
+
+  HighErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Environment}-high-error-rate"
+      AlarmDescription: "Error rate exceeds threshold"
+      Namespace: !Sub "Custom/${Environment}"
+      MetricName: ApplicationErrors
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref SNSTopicArn
+      OKActions:
+        - !Ref SNSTopicArn
+
+  EC2CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasEC2
+    Properties:
+      AlarmName: !Sub "${Environment}-ec2-high-cpu"
+      AlarmDescription: "EC2 CPU utilization exceeds 80%"
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EC2InstanceId
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: missing
+      AlarmActions:
+        - !Ref SNSTopicArn
+
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Environment}-lambda-errors"
+      AlarmDescription: "Lambda function errors detected"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref SNSTopicArn
+
+  ObservabilityDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${Environment}-observability"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text",
+              "x": 0, "y": 0, "width": 24, "height": 2,
+              "properties": {
+                "markdown": "# ${Environment} Observability Dashboard\nMetrics across EC2, Lambda, and Application logs."
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 2, "width": 8, "height": 6,
+              "properties": {
+                "title": "Application Errors",
+                "view": "timeSeries",
+                "metrics": [
+                  ["Custom/${Environment}", "ApplicationErrors", {"stat": "Sum", "period": 300, "color": "#d62728"}]
+                ],
+                "period": 300,
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 2, "width": 8, "height": 6,
+              "properties": {
+                "title": "Lambda Invocations and Errors",
+                "view": "timeSeries",
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", {"stat": "Sum", "period": 60, "color": "#1f77b4"}],
+                  ["AWS/Lambda", "Errors", {"stat": "Sum", "period": 60, "color": "#d62728"}],
+                  ["AWS/Lambda", "Duration", {"stat": "Average", "period": 60, "color": "#ff7f0e"}]
+                ],
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16, "y": 2, "width": 8, "height": 6,
+              "properties": {
+                "title": "EC2 CPU Utilization",
+                "view": "timeSeries",
+                "metrics": [
+                  ["AWS/EC2", "CPUUtilization", {"stat": "Average", "period": 300, "color": "#2ca02c"}]
+                ]
+              }
+            },
+            {
+              "type": "alarm",
+              "x": 0, "y": 8, "width": 24, "height": 4,
+              "properties": {
+                "title": "Alarm Status",
+                "alarms": [
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Environment}-high-error-rate",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${Environment}-lambda-errors"
+                ]
+              }
+            },
+            {
+              "type": "log",
+              "x": 0, "y": 12, "width": 24, "height": 6,
+              "properties": {
+                "title": "Recent Application Errors",
+                "query": "SOURCE '/app/${Environment}/application' | fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 50",
+                "region": "${AWS::Region}",
+                "view": "table"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  DashboardURL:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home#dashboards:name=${Environment}-observability"
+    Description: CloudWatch Dashboard URL
+
+  AppLogGroupName:
+    Value: !Ref AppLogGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-AppLogGroup"

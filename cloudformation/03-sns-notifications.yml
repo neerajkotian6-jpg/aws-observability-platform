@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: SNS topic and subscriptions for observability alerts.
+
+Parameters:
+  NotificationEmail:
+    Type: String
+    Description: Email address to receive alert notifications
+  Environment:
+    Type: String
+    Default: dev
+
+Resources:
+
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${Environment}-observability-alerts"
+      DisplayName: !Sub "[${Environment}] Observability Alerts"
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  AlertsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref AlertsTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudWatchAlarms
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertsTopic
+          - Sid: AllowGrafana
+            Effect: Allow
+            Principal:
+              Service: grafana.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlertsTopic
+          - Sid: AllowAccountPublish
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: sns:Publish
+            Resource: !Ref AlertsTopic
+
+Outputs:
+  SNSTopicArn:
+    Value: !Ref AlertsTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-SNSTopicArn"
+
+  SNSTopicName:
+    Value: !GetAtt AlertsTopic.TopicName

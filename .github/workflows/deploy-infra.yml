@@ -1,0 +1,101 @@
+name: Deploy Infrastructure (CloudFormation)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cloudformation/**"
+      - ".github/workflows/deploy-infra.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy
+        required: true
+        default: dev
+        type: choice
+        options: [dev, staging, prod]
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy CloudFormation Stacks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy SNS Stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${ENVIRONMENT}-observability-sns" \
+            --template-file cloudformation/03-sns-notifications.yml \
+            --parameter-overrides \
+              Environment=${{ env.ENVIRONMENT }} \
+              NotificationEmail=${{ secrets.NOTIFICATION_EMAIL }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Get SNS Topic ARN
+        id: sns
+        run: |
+          SNS_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "${ENVIRONMENT}-observability-sns" \
+            --query "Stacks[0].Outputs[?OutputKey=='SNSTopicArn'].OutputValue" \
+            --output text)
+          echo "arn=${SNS_ARN}" >> $GITHUB_OUTPUT
+
+      - name: Deploy Grafana Stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${ENVIRONMENT}-grafana" \
+            --template-file cloudformation/01-grafana.yml \
+            --parameter-overrides \
+              WorkspaceName="${{ env.ENVIRONMENT }}-observability-workspace" \
+              SSOOrganizationId=${{ secrets.SSO_ORGANIZATION_ID }} \
+              AdminGroupId=${{ secrets.SSO_ADMIN_GROUP_ID }} \
+              NotificationEmail=${{ secrets.NOTIFICATION_EMAIL }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Get Grafana Endpoint
+        id: grafana
+        run: |
+          ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name "${ENVIRONMENT}-grafana" \
+            --query "Stacks[0].Outputs[?OutputKey=='GrafanaEndpoint'].OutputValue" \
+            --output text)
+          echo "url=${ENDPOINT}" >> $GITHUB_OUTPUT
+
+      - name: Deploy CloudWatch Stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${ENVIRONMENT}-cloudwatch-observability" \
+            --template-file cloudformation/02-cloudwatch-observability.yml \
+            --parameter-overrides \
+              Environment=${{ env.ENVIRONMENT }} \
+              SNSTopicArn=${{ steps.sns.outputs.arn }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Output summary
+        run: |
+          echo "### Infrastructure Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ env.ENVIRONMENT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana URL | ${{ steps.grafana.outputs.url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SNS Topic   | ${{ steps.sns.outputs.arn }} |" >> $GITHUB_STEP_SUMMARY

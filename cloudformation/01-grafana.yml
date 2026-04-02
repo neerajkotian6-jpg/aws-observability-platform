@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  AWS Managed Grafana workspace with SSO integration,
+  CloudWatch data source, and plugin installation via CFN Custom Resource.
+
+Parameters:
+  WorkspaceName:
+    Type: String
+    Default: observability-workspace
+  SSOOrganizationId:
+    Type: String
+    Description: AWS SSO / IAM Identity Center organization ID
+  AdminGroupId:
+    Type: String
+    Description: SSO Group ID to grant Grafana Admin role
+  NotificationEmail:
+    Type: String
+    Description: Email for SNS alert notifications
+
+Resources:
+
+  GrafanaWorkspaceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${WorkspaceName}-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: grafana.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonGrafanaCloudWatchAccess
+      Policies:
+        - PolicyName: GrafanaSNSAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                  - sns:ListTopics
+                Resource: "*"
+
+  GrafanaWorkspace:
+    Type: AWS::Grafana::Workspace
+    Properties:
+      Name: !Ref WorkspaceName
+      Description: "Observability platform - CloudWatch + Grafana"
+      AccountAccessType: CURRENT_ACCOUNT
+      AuthenticationProviders:
+        - AWS_SSO
+      PermissionType: SERVICE_MANAGED
+      RoleArn: !GetAtt GrafanaWorkspaceRole.Arn
+      DataSources:
+        - CLOUDWATCH
+      NotificationDestinations:
+        - SNS
+      GrafanaVersion: "10.4"
+
+  GrafanaAdminRoleAssignment:
+    Type: AWS::Grafana::WorkspaceRoleAssignment
+    Properties:
+      WorkspaceId: !GetAtt GrafanaWorkspace.Id
+      GroupIds:
+        - !Ref AdminGroupId
+      Role: ADMIN
+
+  CustomResourceLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${WorkspaceName}-custom-resource-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: GrafanaAPIAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - grafana:CreateWorkspaceApiKey
+                  - grafana:DeleteWorkspaceApiKey
+                  - grafana:DescribeWorkspace
+                Resource: !Sub "arn:aws:grafana:${AWS::Region}:${AWS::AccountId}:/workspaces/${GrafanaWorkspace.Id}"
+
+  GrafanaPluginInstallerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${WorkspaceName}-plugin-installer"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt CustomResourceLambdaRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          WORKSPACE_ID: !GetAtt GrafanaWorkspace.Id
+          WORKSPACE_URL: !Sub "https://${GrafanaWorkspace.Endpoint}"
+          PLUGINS: "grafana-piechart-panel,grafana-clock-panel,grafana-worldmap-panel,marcusolsson-json-datasource"
+      Code:
+        ZipFile: |
+          import json, os, urllib.request, urllib.error, boto3, cfnresponse
+
+          def handler(event, context):
+              print("Event:", json.dumps(event))
+              workspace_id  = os.environ["WORKSPACE_ID"]
+              workspace_url = os.environ["WORKSPACE_URL"]
+              plugins       = os.environ["PLUGINS"].split(",")
+
+              grafana = boto3.client("grafana")
+              status  = cfnresponse.SUCCESS
+              data    = {}
+
+              try:
+                  if event["RequestType"] in ("Create", "Update"):
+                      key_resp = grafana.create_workspace_api_key(
+                          keyName="cfn-plugin-installer",
+                          keyRole="ADMIN",
+                          secondsToLive=300,
+                          workspaceId=workspace_id
+                      )
+                      api_key = key_resp["key"]
+
+                      for plugin in plugins:
+                          plugin = plugin.strip()
+                          url     = f"{workspace_url}/api/plugins/{plugin}/install"
+                          req     = urllib.request.Request(
+                              url,
+                              method="POST",
+                              headers={
+                                  "Authorization": f"Bearer {api_key}",
+                                  "Content-Type": "application/json"
+                              }
+                          )
+                          try:
+                              urllib.request.urlopen(req)
+                              print(f"Installed plugin: {plugin}")
+                          except urllib.error.HTTPError as e:
+                              body = e.read().decode()
+                              if e.code != 409:
+                                  print(f"Failed to install {plugin}: {e.code} {body}")
+
+                      data["Message"] = f"Installed plugins: {', '.join(plugins)}"
+
+              except Exception as e:
+                  print(f"Error: {e}")
+                  status = cfnresponse.FAILED
+                  data["Error"] = str(e)
+
+              cfnresponse.send(event, context, status, data)
+
+  GrafanaPlugins:
+    Type: Custom::GrafanaPluginInstaller
+    DependsOn: GrafanaWorkspace
+    Properties:
+      ServiceToken: !GetAtt GrafanaPluginInstallerFunction.Arn
+      WorkspaceId: !GetAtt GrafanaWorkspace.Id
+      PluginList: "grafana-piechart-panel,grafana-clock-panel,grafana-worldmap-panel,marcusolsson-json-datasource"
+
+Outputs:
+  GrafanaWorkspaceId:
+    Value: !GetAtt GrafanaWorkspace.Id
+    Export:
+      Name: !Sub "${AWS::StackName}-WorkspaceId"
+
+  GrafanaEndpoint:
+    Value: !Sub "https://${GrafanaWorkspace.Endpoint}"
+    Export:
+      Name: !Sub "${AWS::StackName}-Endpoint"
+
+  GrafanaWorkspaceArn:
+    Value: !Sub "arn:aws:grafana:${AWS::Region}:${AWS::AccountId}:/workspaces/${GrafanaWorkspace.Id}"

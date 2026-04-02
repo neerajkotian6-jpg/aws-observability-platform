@@ -1,0 +1,212 @@
+{
+  "apiVersion": 1,
+  "groups": [
+    {
+      "orgId": 1,
+      "name": "CloudWatch Alerts",
+      "folder": "Observability",
+      "interval": "1m",
+      "rules": [
+        {
+          "uid": "cw-high-error-rate",
+          "title": "High Application Error Rate",
+          "condition": "C",
+          "for": "5m",
+          "annotations": {
+            "summary": "Application error rate is high",
+            "description": "More than 10 errors detected in the last 5 minutes. Investigate application logs immediately.",
+            "runbook_url": "https://github.com/your-org/aws-observability-platform/wiki/runbooks/high-error-rate"
+          },
+          "labels": {
+            "severity": "critical",
+            "team": "platform"
+          },
+          "data": [
+            {
+              "refId": "A",
+              "datasourceUid": "cloudwatch",
+              "queryType": "metrics",
+              "model": {
+                "namespace": "Custom/dev",
+                "metricName": "ApplicationErrors",
+                "statistics": ["Sum"],
+                "period": "300"
+              },
+              "relativeTimeRange": { "from": 600, "to": 0 }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "-100",
+              "model": {
+                "type": "reduce",
+                "reducer": "sum",
+                "expression": "A"
+              },
+              "relativeTimeRange": { "from": 600, "to": 0 }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "-100",
+              "model": {
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "evaluator": { "type": "gt", "params": [10] }
+                  }
+                ]
+              },
+              "relativeTimeRange": { "from": 600, "to": 0 }
+            }
+          ]
+        },
+        {
+          "uid": "cw-lambda-errors",
+          "title": "Lambda Function Errors",
+          "condition": "C",
+          "for": "3m",
+          "annotations": {
+            "summary": "Lambda errors detected",
+            "description": "Lambda functions have thrown errors in the last 3 minutes."
+          },
+          "labels": {
+            "severity": "warning",
+            "team": "platform"
+          },
+          "data": [
+            {
+              "refId": "A",
+              "datasourceUid": "cloudwatch",
+              "model": {
+                "namespace": "AWS/Lambda",
+                "metricName": "Errors",
+                "statistics": ["Sum"],
+                "period": "60"
+              },
+              "relativeTimeRange": { "from": 300, "to": 0 }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "-100",
+              "model": {
+                "type": "reduce",
+                "reducer": "sum",
+                "expression": "A"
+              },
+              "relativeTimeRange": { "from": 300, "to": 0 }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "-100",
+              "model": {
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "evaluator": { "type": "gt", "params": [5] }
+                  }
+                ]
+              },
+              "relativeTimeRange": { "from": 300, "to": 0 }
+            }
+          ]
+        },
+        {
+          "uid": "cw-ec2-high-cpu",
+          "title": "EC2 High CPU Utilization",
+          "condition": "C",
+          "for": "10m",
+          "annotations": {
+            "summary": "EC2 CPU above 80%",
+            "description": "EC2 average CPU is elevated. Consider scaling out."
+          },
+          "labels": {
+            "severity": "warning",
+            "team": "platform"
+          },
+          "data": [
+            {
+              "refId": "A",
+              "datasourceUid": "cloudwatch",
+              "model": {
+                "namespace": "AWS/EC2",
+                "metricName": "CPUUtilization",
+                "statistics": ["Average"],
+                "period": "300"
+              },
+              "relativeTimeRange": { "from": 900, "to": 0 }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "-100",
+              "model": {
+                "type": "reduce",
+                "reducer": "last",
+                "expression": "A"
+              },
+              "relativeTimeRange": { "from": 900, "to": 0 }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "-100",
+              "model": {
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "type": "query",
+                    "evaluator": { "type": "gt", "params": [80] }
+                  }
+                ]
+              },
+              "relativeTimeRange": { "from": 900, "to": 0 }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "contactPoints": [
+    {
+      "orgId": 1,
+      "name": "sns-alerts",
+      "receivers": [
+        {
+          "uid": "sns-receiver-1",
+          "type": "sns",
+          "settings": {
+            "topic": "arn:aws:sns:us-east-1:ACCOUNT_ID:dev-observability-alerts",
+            "authProvider": "WorkspaceIAMRole",
+            "messageFormat": "Json"
+          },
+          "disableResolveMessage": false
+        }
+      ]
+    }
+  ],
+  "notificationPolicies": {
+    "orgId": 1,
+    "receiver": "sns-alerts",
+    "group_by": ["alertname", "severity"],
+    "group_wait": "30s",
+    "group_interval": "5m",
+    "repeat_interval": "1h",
+    "routes": [
+      {
+        "receiver": "sns-alerts",
+        "matchers": ["severity=critical"],
+        "group_wait": "10s",
+        "repeat_interval": "30m"
+      }
+    ]
+  },
+  "templates": [
+    {
+      "orgId": 1,
+      "name": "alert-notification-template",
+      "template": "{{ define \"aws_alert\" }}\n[{{ .Status | toUpper }}] {{ .CommonAnnotations.summary }}\n\nSeverity: {{ .CommonLabels.severity }}\n\n{{ .CommonAnnotations.description }}\n{{ end }}"
+    }
+  ]
+}
