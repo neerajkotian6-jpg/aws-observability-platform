@@ -144,7 +144,7 @@ Resources:
                   - grafana:DescribeWorkspace
                   - grafana:UpdatePermissions
                   - grafana:ListPermissions
-                Resource: !Sub "arn:aws:grafana:${AWS::Region}:${AWS::AccountId}:/workspaces/${GrafanaWorkspace.Id}"
+                Resource: "*"
 
   GrafanaPluginInstallerFunction:
     Type: AWS::Lambda::Function
