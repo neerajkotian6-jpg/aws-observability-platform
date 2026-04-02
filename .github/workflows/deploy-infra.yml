@@ -58,6 +58,20 @@ jobs:
             --output text)
           echo "arn=${SNS_ARN}" >> $GITHUB_OUTPUT
 
+      - name: Delete Grafana stack if in ROLLBACK_COMPLETE state
+        run: |
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "${ENVIRONMENT}-grafana" \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          echo "Current stack status: $STATUS"
+          if [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
+            echo "Stack in ROLLBACK_COMPLETE — deleting before redeploy..."
+            aws cloudformation delete-stack --stack-name "${ENVIRONMENT}-grafana"
+            aws cloudformation wait stack-delete-complete --stack-name "${ENVIRONMENT}-grafana"
+            echo "Stack deleted successfully"
+          fi
+
       - name: Deploy Grafana Stack
         run: |
           aws cloudformation deploy \
