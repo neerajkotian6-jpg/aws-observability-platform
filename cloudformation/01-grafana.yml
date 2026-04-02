@@ -1,7 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: >
-  AWS Managed Grafana workspace with SSO integration,
-  CloudWatch data source, and plugin installation via CFN Custom Resource.
+Description: "AWS Managed Grafana workspace with SSO and CloudWatch"
 
 Parameters:
   WorkspaceName:
@@ -9,13 +7,10 @@ Parameters:
     Default: observability-workspace
   SSOOrganizationId:
     Type: String
-    Description: AWS SSO / IAM Identity Center organization ID
   AdminGroupId:
     Type: String
-    Description: SSO Group ID to grant Grafana Admin role
   NotificationEmail:
     Type: String
-    Description: Email for SNS alert notifications
 
 Resources:
 
@@ -59,70 +54,10 @@ Resources:
         - SNS
       GrafanaVersion: "10.4"
 
-  GrafanaRoleAssignmentFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub "${WorkspaceName}-role-assignment"
-      Runtime: python3.12
-      Handler: index.handler
-      Role: !GetAtt CustomResourceLambdaRole.Arn
-      Timeout: 60
-      Code:
-        ZipFile: |
-          import json, urllib.request, boto3
-
-          SUCCESS = "SUCCESS"
-          FAILED = "FAILED"
-
-          def send(event, context, status, data={}, reason=""):
-              body = json.dumps({
-                  "Status": status,
-                  "Reason": reason or f"See CloudWatch log stream: {context.log_stream_name}",
-                  "PhysicalResourceId": context.log_stream_name,
-                  "StackId": event["StackId"],
-                  "RequestId": event["RequestId"],
-                  "LogicalResourceId": event["LogicalResourceId"],
-                  "Data": data
-              })
-              url = event["ResponseURL"]
-              req = urllib.request.Request(url, data=body.encode(), method="PUT")
-              req.add_header("Content-Type", "")
-              req.add_header("Content-Length", str(len(body)))
-              urllib.request.urlopen(req)
-
-          def handler(event, context):
-              print("Event:", json.dumps(event))
-              try:
-                  if event["RequestType"] in ("Create", "Update"):
-                      grafana = boto3.client("grafana")
-                      grafana.update_permissions(
-                          workspaceId=event["ResourceProperties"]["WorkspaceId"],
-                          updateInstructionBatch=[{
-                              "action": "ADD",
-                              "role": "ADMIN",
-                              "users": [{
-                                  "id": event["ResourceProperties"]["GroupId"],
-                                  "type": "SSO_GROUP"
-                              }]
-                          }]
-                      )
-                  send(event, context, SUCCESS, {"Message": "Role assigned"})
-              except Exception as e:
-                  print(f"Error: {e}")
-                  send(event, context, FAILED, reason=str(e))
-
-  GrafanaAdminRoleAssignment:
-    Type: Custom::GrafanaRoleAssignment
-    DependsOn: GrafanaWorkspace
-    Properties:
-      ServiceToken: !GetAtt GrafanaRoleAssignmentFunction.Arn
-      WorkspaceId: !GetAtt GrafanaWorkspace.Id
-      GroupId: !Ref AdminGroupId
-
-  CustomResourceLambdaRole:
+  PluginInstallerRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${WorkspaceName}-custom-resource-lambda-role"
+      RoleName: !Sub "${WorkspaceName}-plugin-role"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -133,7 +68,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: GrafanaAPIAccess
+        - PolicyName: GrafanaPluginAccess
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -142,17 +77,15 @@ Resources:
                   - grafana:CreateWorkspaceApiKey
                   - grafana:DeleteWorkspaceApiKey
                   - grafana:DescribeWorkspace
-                  - grafana:UpdatePermissions
-                  - grafana:ListPermissions
                 Resource: "*"
 
-  GrafanaPluginInstallerFunction:
+  PluginInstallerFunction:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub "${WorkspaceName}-plugin-installer"
       Runtime: python3.12
       Handler: index.handler
-      Role: !GetAtt CustomResourceLambdaRole.Arn
+      Role: !GetAtt PluginInstallerRole.Arn
       Timeout: 300
       Environment:
         Variables:
@@ -169,7 +102,7 @@ Resources:
           def send(event, context, status, data={}, reason=""):
               body = json.dumps({
                   "Status": status,
-                  "Reason": reason or f"See CloudWatch log stream: {context.log_stream_name}",
+                  "Reason": reason or f"See log stream: {context.log_stream_name}",
                   "PhysicalResourceId": context.log_stream_name,
                   "StackId": event["StackId"],
                   "RequestId": event["RequestId"],
@@ -184,12 +117,12 @@ Resources:
 
           def handler(event, context):
               print("Event:", json.dumps(event))
-              workspace_id  = os.environ["WORKSPACE_ID"]
-              workspace_url = os.environ["WORKSPACE_URL"]
-              plugins       = os.environ["PLUGINS"].split(",")
-              grafana = boto3.client("grafana")
               try:
                   if event["RequestType"] in ("Create", "Update"):
+                      workspace_id  = os.environ["WORKSPACE_ID"]
+                      workspace_url = os.environ["WORKSPACE_URL"]
+                      plugins = os.environ["PLUGINS"].split(",")
+                      grafana = boto3.client("grafana")
                       key_resp = grafana.create_workspace_api_key(
                           keyName="cfn-plugin-installer",
                           keyRole="ADMIN",
@@ -202,15 +135,18 @@ Resources:
                           url = f"{workspace_url}/api/plugins/{plugin}/install"
                           req = urllib.request.Request(
                               url, method="POST",
-                              headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                              headers={
+                                  "Authorization": f"Bearer {api_key}",
+                                  "Content-Type": "application/json"
+                              }
                           )
                           try:
                               urllib.request.urlopen(req)
-                              print(f"Installed plugin: {plugin}")
+                              print(f"Installed: {plugin}")
                           except urllib.error.HTTPError as e:
                               if e.code != 409:
                                   print(f"Failed {plugin}: {e.code}")
-                  send(event, context, SUCCESS, {"Message": "Plugins installed"})
+                  send(event, context, SUCCESS, {"Message": "Done"})
               except Exception as e:
                   print(f"Error: {e}")
                   send(event, context, FAILED, reason=str(e))
@@ -219,9 +155,8 @@ Resources:
     Type: Custom::GrafanaPluginInstaller
     DependsOn: GrafanaWorkspace
     Properties:
-      ServiceToken: !GetAtt GrafanaPluginInstallerFunction.Arn
+      ServiceToken: !GetAtt PluginInstallerFunction.Arn
       WorkspaceId: !GetAtt GrafanaWorkspace.Id
-      PluginList: "grafana-piechart-panel,grafana-clock-panel,grafana-worldmap-panel,marcusolsson-json-datasource"
 
 Outputs:
   GrafanaWorkspaceId:
@@ -233,6 +168,3 @@ Outputs:
     Value: !Sub "https://${GrafanaWorkspace.Endpoint}"
     Export:
       Name: !Sub "${AWS::StackName}-Endpoint"
-
-  GrafanaWorkspaceArn:
-    Value: !Sub "arn:aws:grafana:${AWS::Region}:${AWS::AccountId}:/workspaces/${GrafanaWorkspace.Id}"
