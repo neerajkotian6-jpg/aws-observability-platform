@@ -59,13 +59,47 @@ Resources:
         - SNS
       GrafanaVersion: "10.4"
 
-  GrafanaAdminRoleAssignment:
-    Type: AWS::Grafana::WorkspaceRoleAssignment
+  GrafanaRoleAssignmentFunction:
+    Type: AWS::Lambda::Function
     Properties:
+      FunctionName: !Sub "${WorkspaceName}-role-assignment"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt CustomResourceLambdaRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3, cfnresponse
+
+          def handler(event, context):
+              print("Event:", str(event))
+              status = cfnresponse.SUCCESS
+              try:
+                  if event["RequestType"] in ("Create", "Update"):
+                      grafana = boto3.client("grafana")
+                      grafana.update_permissions(
+                          workspaceId=event["ResourceProperties"]["WorkspaceId"],
+                          updateInstructionBatch=[{
+                              "action": "ADD",
+                              "role": "ADMIN",
+                              "users": [{
+                                  "id": event["ResourceProperties"]["GroupId"],
+                                  "type": "SSO_GROUP"
+                              }]
+                          }]
+                      )
+              except Exception as e:
+                  print(f"Error: {e}")
+                  status = cfnresponse.FAILED
+              cfnresponse.send(event, context, status, {})
+
+  GrafanaAdminRoleAssignment:
+    Type: Custom::GrafanaRoleAssignment
+    DependsOn: GrafanaWorkspace
+    Properties:
+      ServiceToken: !GetAtt GrafanaRoleAssignmentFunction.Arn
       WorkspaceId: !GetAtt GrafanaWorkspace.Id
-      GroupIds:
-        - !Ref AdminGroupId
-      Role: ADMIN
+      GroupId: !Ref AdminGroupId
 
   CustomResourceLambdaRole:
     Type: AWS::IAM::Role
@@ -90,6 +124,8 @@ Resources:
                   - grafana:CreateWorkspaceApiKey
                   - grafana:DeleteWorkspaceApiKey
                   - grafana:DescribeWorkspace
+                  - grafana:UpdatePermissions
+                  - grafana:ListPermissions
                 Resource: !Sub "arn:aws:grafana:${AWS::Region}:${AWS::AccountId}:/workspaces/${GrafanaWorkspace.Id}"
 
   GrafanaPluginInstallerFunction:
