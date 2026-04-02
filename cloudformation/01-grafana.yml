@@ -69,11 +69,29 @@ Resources:
       Timeout: 60
       Code:
         ZipFile: |
-          import boto3, cfnresponse
+          import json, urllib.request, boto3
+
+          SUCCESS = "SUCCESS"
+          FAILED = "FAILED"
+
+          def send(event, context, status, data={}, reason=""):
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": reason or f"See CloudWatch log stream: {context.log_stream_name}",
+                  "PhysicalResourceId": context.log_stream_name,
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "Data": data
+              })
+              url = event["ResponseURL"]
+              req = urllib.request.Request(url, data=body.encode(), method="PUT")
+              req.add_header("Content-Type", "")
+              req.add_header("Content-Length", str(len(body)))
+              urllib.request.urlopen(req)
 
           def handler(event, context):
-              print("Event:", str(event))
-              status = cfnresponse.SUCCESS
+              print("Event:", json.dumps(event))
               try:
                   if event["RequestType"] in ("Create", "Update"):
                       grafana = boto3.client("grafana")
@@ -88,10 +106,10 @@ Resources:
                               }]
                           }]
                       )
+                  send(event, context, SUCCESS, {"Message": "Role assigned"})
               except Exception as e:
                   print(f"Error: {e}")
-                  status = cfnresponse.FAILED
-              cfnresponse.send(event, context, status, {})
+                  send(event, context, FAILED, reason=str(e))
 
   GrafanaAdminRoleAssignment:
     Type: Custom::GrafanaRoleAssignment
@@ -143,18 +161,33 @@ Resources:
           PLUGINS: "grafana-piechart-panel,grafana-clock-panel,grafana-worldmap-panel,marcusolsson-json-datasource"
       Code:
         ZipFile: |
-          import json, os, urllib.request, urllib.error, boto3, cfnresponse
+          import json, os, urllib.request, urllib.error, boto3
+
+          SUCCESS = "SUCCESS"
+          FAILED = "FAILED"
+
+          def send(event, context, status, data={}, reason=""):
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": reason or f"See CloudWatch log stream: {context.log_stream_name}",
+                  "PhysicalResourceId": context.log_stream_name,
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "Data": data
+              })
+              url = event["ResponseURL"]
+              req = urllib.request.Request(url, data=body.encode(), method="PUT")
+              req.add_header("Content-Type", "")
+              req.add_header("Content-Length", str(len(body)))
+              urllib.request.urlopen(req)
 
           def handler(event, context):
               print("Event:", json.dumps(event))
               workspace_id  = os.environ["WORKSPACE_ID"]
               workspace_url = os.environ["WORKSPACE_URL"]
               plugins       = os.environ["PLUGINS"].split(",")
-
               grafana = boto3.client("grafana")
-              status  = cfnresponse.SUCCESS
-              data    = {}
-
               try:
                   if event["RequestType"] in ("Create", "Update"):
                       key_resp = grafana.create_workspace_api_key(
@@ -164,34 +197,23 @@ Resources:
                           workspaceId=workspace_id
                       )
                       api_key = key_resp["key"]
-
                       for plugin in plugins:
                           plugin = plugin.strip()
-                          url     = f"{workspace_url}/api/plugins/{plugin}/install"
-                          req     = urllib.request.Request(
-                              url,
-                              method="POST",
-                              headers={
-                                  "Authorization": f"Bearer {api_key}",
-                                  "Content-Type": "application/json"
-                              }
+                          url = f"{workspace_url}/api/plugins/{plugin}/install"
+                          req = urllib.request.Request(
+                              url, method="POST",
+                              headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
                           )
                           try:
                               urllib.request.urlopen(req)
                               print(f"Installed plugin: {plugin}")
                           except urllib.error.HTTPError as e:
-                              body = e.read().decode()
                               if e.code != 409:
-                                  print(f"Failed to install {plugin}: {e.code} {body}")
-
-                      data["Message"] = f"Installed plugins: {', '.join(plugins)}"
-
+                                  print(f"Failed {plugin}: {e.code}")
+                  send(event, context, SUCCESS, {"Message": "Plugins installed"})
               except Exception as e:
                   print(f"Error: {e}")
-                  status = cfnresponse.FAILED
-                  data["Error"] = str(e)
-
-              cfnresponse.send(event, context, status, data)
+                  send(event, context, FAILED, reason=str(e))
 
   GrafanaPlugins:
     Type: Custom::GrafanaPluginInstaller
