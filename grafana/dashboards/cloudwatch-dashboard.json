@@ -29,7 +29,7 @@
           { "text": "ap-south-1", "value": "ap-south-1" },
           { "text": "eu-west-1",  "value": "eu-west-1"  }
         ],
-        "current": { "text": "ap-south-1", "value": "ap-south-1" }
+        "current": { "text": "ap-southeast-1", "value": "ap-southeast-1" }
       }
     ]
   },
