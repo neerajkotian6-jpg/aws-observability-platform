@@ -1,209 +1,143 @@
 # AWS Observability Platform
 
-End-to-end observability platform using **AWS Managed Grafana**, **CloudWatch**, and **SNS** — fully deployed as Infrastructure as Code via CloudFormation and automated through GitHub Actions CI/CD pipelines.
+This project sets up an observability platform on AWS using Managed Grafana, CloudWatch and SNS. Everything is written as Infrastructure as Code using CloudFormation templates and deployed automatically through GitHub Actions pipelines.
 
 ---
 
-## Architecture Overview
+## What this project does
 
-```
-GitHub (source of truth)
-       │
-       ▼
-GitHub Actions CI/CD
-  ├── deploy-infra.yml        →  CloudFormation stacks
-  └── deploy-dashboards.yml   →  Grafana API (dashboards + alerts)
-       │
-       ▼
-AWS (ap-southeast-1)
-  ├── Stack 1: SNS            →  Notification topic + email subscription
-  ├── Stack 2: Grafana        →  Managed Grafana workspace + SSO + plugins
-  └── Stack 3: CloudWatch     →  Log groups + metric filters + alarms + dashboard
-```
+The idea was to build a complete monitoring setup where:
+- Grafana is provisioned automatically with SSO login (no manual user management)
+- CloudWatch collects metrics and logs from AWS services
+- Alerts fire to email via SNS when something goes wrong
+- All of this deploys automatically when code is pushed to GitHub — no manual steps in the AWS console
 
 ---
 
-## What Is Deployed
-
-| Component | Description |
-|---|---|
-| AWS Managed Grafana | Grafana 10.4 workspace with SSO via IAM Identity Center |
-| SSO Integration | IAM Identity Center group assigned Admin role |
-| Grafana Plugins | piechart, clock, worldmap, JSON datasource — installed via CFN Custom Resource |
-| CloudWatch Dashboard | 6 panels: EC2 CPU, Lambda metrics, app errors, log insights |
-| CloudWatch Alarms | High error rate, Lambda errors, EC2 CPU > 80% |
-| Grafana Alert Rules | 3 rules with A→B→C pattern, routed to SNS |
-| SNS Notifications | Email subscription with contact point and notification policy |
-| CI/CD Pipelines | Two GitHub Actions pipelines using OIDC (no stored AWS keys) |
-
----
-
-## Repository Structure
+## Folder structure
 
 ```
 aws-observability-platform/
 ├── .github/
 │   └── workflows/
-│       ├── deploy-infra.yml          # Deploys CFN stacks: SNS → Grafana → CloudWatch
-│       └── deploy-dashboards.yml     # Deploys Grafana dashboards and alerts via HTTP API
+│       ├── deploy-infra.yml          # pipeline that deploys the 3 CFN stacks
+│       └── deploy-dashboards.yml     # pipeline that pushes dashboards and alerts to Grafana
 ├── cloudformation/
-│   ├── 01-grafana.yml                # Grafana workspace + IAM roles + Lambda custom resource
-│   ├── 02-cloudwatch-observability.yml  # Log groups + metric filters + alarms + CW dashboard
-│   └── 03-sns-notifications.yml      # SNS topic + email subscription + topic policy
+│   ├── 01-grafana.yml                # Grafana workspace, IAM role, Lambda for plugins
+│   ├── 02-cloudwatch-observability.yml  # log groups, alarms, metric filter, CW dashboard
+│   └── 03-sns-notifications.yml      # SNS topic and email subscription
 ├── grafana/
 │   ├── dashboards/
-│   │   └── cloudwatch-dashboard.json # Grafana dashboard with 6 panels
+│   │   └── cloudwatch-dashboard.json
 │   └── alerts/
-│       └── cloudwatch-alerts.json    # Alert rules + contact point + notification policy
+│       └── cloudwatch-alerts.json
 ├── scripts/
-│   └── deploy_grafana_config.sh      # Deploys Grafana config via HTTP API
+│   └── deploy_grafana_config.sh
 └── README.md
 ```
 
 ---
 
-## Key Design Decisions
+## How the deployment works
 
-### 1. Three separate CloudFormation stacks
-SNS is deployed first because both the Grafana and CloudWatch stacks need the SNS topic ARN as an input parameter. The GitHub Actions pipeline reads the ARN from the SNS stack outputs and passes it automatically — no hardcoding.
+There are two GitHub Actions pipelines:
 
-### 2. CFN Custom Resource for Grafana plugins
-CloudFormation has no native resource type for installing Grafana plugins. A Lambda function is triggered by CloudFormation during stack creation, calls the Grafana HTTP API to install the plugins, and signals back with success or failure. If the Lambda fails, the entire stack rolls back automatically.
+**Pipeline 1 — deploy-infra.yml**
 
-### 3. OIDC authentication — no stored AWS credentials
-GitHub Actions authenticates to AWS using OpenID Connect (OIDC). GitHub generates a short-lived JWT token per pipeline run, AWS validates it against the OIDC provider, and returns temporary credentials. Zero long-lived keys stored anywhere in GitHub.
-
-### 4. Temporary Grafana API key — 10-minute TTL
-The dashboard pipeline creates a Grafana API key with a 600-second TTL, uses it to push dashboards and alerts, and the key auto-expires. The key is masked in all pipeline logs using `::add-mask::`.
-
-### 5. Dashboards and alerts as code
-All Grafana configuration (dashboards, alert rules, contact points, notification policies) is defined as JSON files in Git and deployed via the Grafana HTTP API. Nothing is manually configured in the UI. Git is the single source of truth.
-
----
-
-## CI/CD Pipeline Flow
+Runs when anything in `cloudformation/` changes. Deploys the three stacks in a specific order because the SNS topic has to exist before the other two stacks can reference its ARN:
 
 ```
-Push to main branch
-       │
-       ▼
-deploy-infra.yml
-  Step 1: Configure AWS via OIDC
-  Step 2: Deploy SNS stack        → outputs SNS topic ARN
-  Step 3: Deploy Grafana stack    → outputs Grafana URL + workspace ID
-  Step 4: Deploy CloudWatch stack → uses SNS ARN from Step 2
-       │
-       ▼  (auto-triggered on completion)
-deploy-dashboards.yml
-  Step 1: Read Grafana URL from CFN outputs
-  Step 2: Create temporary Grafana API key (TTL: 600s)
-  Step 3: Run deploy_grafana_config.sh
-           → Create Observability folder
-           → Import CloudWatch dashboard
-           → Deploy SNS contact point
-           → Set notification policy
+SNS stack → Grafana stack → CloudWatch stack
 ```
 
----
+Each stack's outputs are read and passed as inputs to the next stack automatically.
 
-## Grafana Alert Rules
+**Pipeline 2 — deploy-dashboards.yml**
 
-Each alert follows the **A → B → C pattern**:
-- **A** — Query the CloudWatch metric
-- **B** — Reduce the time series to a single value
-- **C** — Evaluate the threshold condition
+Runs after Pipeline 1 finishes, or when Grafana JSON files change. It:
+1. Gets the Grafana workspace URL from the CFN stack outputs
+2. Creates a temporary API key (expires in 10 minutes)
+3. Calls the Grafana HTTP API to push dashboards, alert rules and the SNS contact point
+4. The API key expires automatically after the pipeline finishes
 
-| Alert | Metric | Threshold | Severity |
-|---|---|---|---|
-| High Application Error Rate | Custom/dev — ApplicationErrors | > 10 errors in 5 min | Critical |
-| Lambda Function Errors | AWS/Lambda — Errors | > 5 errors in 3 min | Warning |
-| EC2 High CPU | AWS/EC2 — CPUUtilization | > 80% for 10 min | Warning |
-
-All alerts route to SNS → email via the notification policy.
+Both pipelines authenticate to AWS using OIDC — no access keys are stored in GitHub at all.
 
 ---
 
-## GitHub Secrets Required
+## CloudFormation stacks
 
-| Secret | Description |
+**03-sns-notifications.yml**
+
+Creates the SNS topic and email subscription. Also sets up the topic policy so CloudWatch and Grafana are allowed to publish to it. Deployed first because the other stacks need the topic ARN.
+
+**01-grafana.yml**
+
+Creates the Grafana workspace with SSO authentication and CloudWatch as a data source. Also includes two Lambda functions as CloudFormation Custom Resources:
+- One installs Grafana plugins (piechart, clock, worldmap, JSON datasource)
+- One assigns the SSO group as Admin in the workspace
+
+I had to use Custom Resources here because CloudFormation does not have native support for installing Grafana plugins or assigning SSO roles directly.
+
+**02-cloudwatch-observability.yml**
+
+Sets up the CloudWatch side of things:
+- Two log groups for application and system logs
+- A metric filter that turns ERROR log lines into a CloudWatch metric
+- Three alarms (high error rate, Lambda errors, EC2 CPU)
+- A CloudWatch dashboard with panels for all key metrics
+
+---
+
+## Grafana alerts
+
+Each alert rule follows the same three-step structure:
+
+- **Step A** — queries the CloudWatch metric
+- **Step B** — reduces the data to a single number
+- **Step C** — checks if that number crosses the threshold
+
+| Alert | Condition | Severity |
+|---|---|---|
+| High Application Error Rate | more than 10 errors in 5 minutes | critical |
+| Lambda Function Errors | more than 5 errors in 3 minutes | warning |
+| EC2 High CPU | above 80% for 10 minutes | warning |
+
+When an alert fires it goes to the SNS contact point which sends an email.
+
+---
+
+## GitHub Secrets needed
+
+| Secret | What it is |
 |---|---|
-| `AWS_ROLE_ARN` | IAM role ARN for GitHub Actions OIDC authentication |
-| `AWS_ACCOUNT_ID` | 12-digit AWS account ID |
-| `SSO_ORGANIZATION_ID` | IAM Identity Center Identity Store ID (d-xxxxxxxxxx) |
-| `SSO_ADMIN_GROUP_ID` | SSO group ID for Grafana admin access |
-| `NOTIFICATION_EMAIL` | Email address for SNS alert notifications |
+| `AWS_ROLE_ARN` | the IAM role GitHub Actions assumes via OIDC |
+| `AWS_ACCOUNT_ID` | your AWS account ID |
+| `SSO_ORGANIZATION_ID` | Identity Store ID from IAM Identity Center (starts with d-) |
+| `SSO_ADMIN_GROUP_ID` | the group ID of the Grafana admin group in SSO |
+| `NOTIFICATION_EMAIL` | email address for alert notifications |
 
 ---
 
-## Deployment
+## Region note
 
-### Automated (recommended)
-Push any change to `main` → GitHub Actions deploys automatically.
-
-### Manual via AWS CLI
-```bash
-# 1. Deploy SNS stack first
-aws cloudformation deploy \
-  --stack-name dev-observability-sns \
-  --template-file cloudformation/03-sns-notifications.yml \
-  --parameter-overrides Environment=dev NotificationEmail=your@email.com \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --region ap-southeast-1
-
-# 2. Get SNS ARN
-SNS_ARN=$(aws cloudformation describe-stacks \
-  --stack-name dev-observability-sns \
-  --query "Stacks[0].Outputs[?OutputKey=='SNSTopicArn'].OutputValue" \
-  --output text --region ap-southeast-1)
-
-# 3. Deploy Grafana stack
-aws cloudformation deploy \
-  --stack-name dev-grafana \
-  --template-file cloudformation/01-grafana.yml \
-  --parameter-overrides \
-    WorkspaceName=dev-observability-workspace \
-    SSOOrganizationId=<your-sso-id> \
-    AdminGroupId=<your-group-id> \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --region ap-southeast-1
-
-# 4. Deploy CloudWatch stack
-aws cloudformation deploy \
-  --stack-name dev-cloudwatch-observability \
-  --template-file cloudformation/02-cloudwatch-observability.yml \
-  --parameter-overrides Environment=dev SNSTopicArn=$SNS_ARN \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --region ap-southeast-1
-```
+AWS Managed Grafana CloudFormation support is not available in all regions. This project uses **ap-southeast-1 (Singapore)** as it is the closest supported region to India.
 
 ---
 
 ## Cost
 
-| Service | Cost | Notes |
-|---|---|---|
-| AWS Managed Grafana | ~$0.30/day | Only chargeable service — delete workspace after demo |
-| CloudWatch | $0.00 | Within free tier (10 alarms, 5GB logs) |
-| SNS | $0.00 | Within free tier (1M publishes) |
-| Lambda | $0.00 | Within free tier (1M requests) |
-| GitHub Actions | $0.00 | Free for public repos |
+The only service that costs money is AWS Managed Grafana (~$0.30 per day). Everything else — CloudWatch, SNS, Lambda, IAM — stays within the free tier for this level of usage.
 
-**To stop all billing:** Delete the `dev-grafana` CloudFormation stack immediately after the demo.
+Delete the Grafana stack after the demo to stop billing:
 
 ```bash
-aws cloudformation delete-stack --stack-name dev-grafana --region ap-southeast-1
+aws cloudformation delete-stack \
+  --stack-name dev-grafana \
+  --region ap-southeast-1
 ```
 
 ---
 
-## Technologies Used
+## Technologies
 
-- **AWS Managed Grafana** — managed Grafana service with SSO
-- **AWS CloudFormation** — infrastructure as code
-- **AWS CloudWatch** — metrics, logs, alarms, dashboards
-- **AWS SNS** — alert notifications
-- **AWS Lambda** — CloudFormation custom resource handler
-- **AWS IAM Identity Center** — SSO authentication
-- **GitHub Actions** — CI/CD pipelines with OIDC
-- **Python 3.12** — Lambda function runtime
-- **Bash** — deployment scripting
+AWS Managed Grafana, CloudFormation, CloudWatch, SNS, Lambda, IAM Identity Center, GitHub Actions, Python 3.12, Bash
